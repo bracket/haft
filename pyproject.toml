@@ -9,7 +9,7 @@ description = "Selection parser and resolver for byte/Unicode range specificatio
 authors = [
     {name = "Stephen McCray"}
 ]
-license = {text = "MIT"}
+license = "LicenseRef-Proprietary"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
