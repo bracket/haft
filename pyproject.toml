@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haft"
-version = "0.1.0"
+version = "0.1.1"
 description = "Selection parser and resolver for byte/Unicode range specification"
 authors = [
     {name = "Stephen McCray"}
