@@ -202,11 +202,13 @@ class ChatSession:
             call_items, output_replies = self._dispatch_tool_calls(function_calls, turn, iterations)
             input_items = input_items + call_items + output_replies
 
-        assert self.max_iterations is not None
+        max_iterations = self.max_iterations
+        if max_iterations is None:
+            raise RuntimeError("max_iterations unexpectedly unset")
         self.transcript.append(turn)
         self._emit("max_iterations", iteration=iterations)
         raise MaxIterationsExceededError(
-            self.max_iterations,
+            max_iterations,
             turn=turn,
             iterations=iterations,
         )

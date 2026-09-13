@@ -1,6 +1,0 @@
-mcp<3,>=2
-anyio
-httpx
-
-[dev]
-pytest>=7.0.0
