@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import textwrap
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -20,6 +21,17 @@ class ToolNameCollisionError(ValueError):
 
 class MaxIterationsExceededError(RuntimeError):
     """Raised when the model exceeds the configured call loop backstop."""
+
+    def __init__(
+        self,
+        max_iterations: int,
+        *,
+        turn: Turn | None = None,
+        iterations: int = 0,
+    ) -> None:
+        super().__init__(f"Exceeded maximum model-call iterations ({max_iterations})")
+        self.turn = turn
+        self.iterations = iterations
 
 
 ResponsesClient = Callable[..., dict[str, Any]]
@@ -73,17 +85,24 @@ class ChatSession:
         system_prompt: str = "",
         max_iterations: int | None = 10,
         *,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
         stream: bool = False,
         request_headers: Mapping[str, str] | None = None,
         _responses_client: ResponsesClient | None = None,
         _mcp_session_factory: McpSessionFactory | None = None,
     ) -> None:
+        """Initialize a chat session.
+
+        The optional ``on_event`` callback is invoked synchronously. It must not
+        raise, and callback exceptions are not caught.
+        """
         self.model = model
         self.base_url = base_url
         self.system_prompt = system_prompt
         if max_iterations is not None and max_iterations < 0:
             raise ValueError("max_iterations must be >= 0 or None")
         self.max_iterations = max_iterations
+        self.on_event = on_event
         self.stream = stream
         self.request_headers = dict(request_headers or {})
         self.transcript: list[Turn] = []
@@ -96,6 +115,12 @@ class ChatSession:
         self._closed = False
         self._responses_client = _responses_client or send_responses_request
         self._mcp_session_factory = _mcp_session_factory or create_mcp_session
+
+    def _emit(self, event_type: str, **fields: Any) -> None:
+        callback = self.on_event
+        if callback is None:
+            return
+        callback({"type": event_type, "ts": time.time(), **fields})
 
     def __enter__(self) -> Self:
         return self
@@ -158,6 +183,7 @@ class ChatSession:
         iterations = 0
         while self.max_iterations is None or iterations < self.max_iterations:
             iterations += 1
+            self._emit("iteration", iteration=iterations, max_iterations=self.max_iterations)
             response = self._request_response(input_items)
             output_items = _read_output_items(response)
             turn.output_items.extend(output_items)
@@ -166,13 +192,26 @@ class ChatSession:
             function_calls = _read_function_calls(output_items)
             if not function_calls:
                 turn.response_text = _extract_response_text(output_items)
+                self._emit("finished", iteration=iterations, text=turn.response_text)
                 self.transcript.append(turn)
                 return turn
 
-            call_items, output_replies = self._dispatch_tool_calls(function_calls, turn)
+            assistant_text = _extract_response_text(output_items)
+            if assistant_text:
+                self._emit("assistant_text", iteration=iterations, text=assistant_text)
+            call_items, output_replies = self._dispatch_tool_calls(function_calls, turn, iterations)
             input_items = input_items + call_items + output_replies
 
-        raise MaxIterationsExceededError("Exceeded maximum model-call iterations")
+        max_iterations = self.max_iterations
+        if max_iterations is None:
+            raise RuntimeError("max_iterations unexpectedly unset")
+        self.transcript.append(turn)
+        self._emit("max_iterations", iteration=iterations, max_iterations=max_iterations)
+        raise MaxIterationsExceededError(
+            max_iterations,
+            turn=turn,
+            iterations=iterations,
+        )
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -223,6 +262,7 @@ class ChatSession:
         self,
         function_calls: list[dict[str, Any]],
         turn: Turn,
+        iteration: int,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         call_items: list[dict[str, Any]] = []
         output_items: list[dict[str, Any]] = []
@@ -232,9 +272,33 @@ class ChatSession:
             if binding is None:
                 raise KeyError(f"Unknown MCP tool requested: {tool_name}")
             arguments = _parse_tool_arguments(call.get("arguments"))
-            result = binding.session.call_tool(tool_name, arguments)
             call_id = _read_call_id(call)
+            self._emit(
+                "tool_call",
+                iteration=iteration,
+                name=tool_name,
+                call_id=call_id,
+                arguments=arguments,
+            )
+            try:
+                result = binding.session.call_tool(tool_name, arguments)
+            except Exception as exc:
+                self._emit(
+                    "tool_error",
+                    iteration=iteration,
+                    name=tool_name,
+                    call_id=call_id,
+                    error=str(exc),
+                )
+                raise
             output_text = _tool_output_text(result)
+            self._emit(
+                "tool_result",
+                iteration=iteration,
+                name=tool_name,
+                call_id=call_id,
+                output=output_text,
+            )
             turn.tool_calls.append(_normalize_value(call))
             turn.tool_results.append({"call_id": call_id, "name": tool_name, "result": output_text})
             call_items.append(_normalize_value(call))

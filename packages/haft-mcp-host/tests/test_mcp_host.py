@@ -8,15 +8,16 @@ from typing import Any, Self
 
 import pytest
 
-from haft.mcp_host import ChatSession, McpServer
+from haft.mcp_host import ChatSession, MaxIterationsExceededError, McpServer
 from haft.mcp_host.responses import send_responses_request
-from haft.mcp_host.session import MaxIterationsExceededError, ToolNameCollisionError
+from haft.mcp_host.session import ToolNameCollisionError
 
 
 @dataclass
 class _FakeMcpSession:
     tools: list[dict[str, Any]]
     tool_result: Any = field(default_factory=dict)
+    tool_error: Exception | None = None
     list_calls: int = 0
     call_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     closed: bool = False
@@ -27,6 +28,8 @@ class _FakeMcpSession:
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         self.call_calls.append((name, arguments))
+        if self.tool_error is not None:
+            raise self.tool_error
         return self.tool_result
 
     def close(self) -> None:
@@ -41,6 +44,14 @@ class _FakeResponsesClient:
     def __call__(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         return self.responses[len(self.calls) - 1]
+
+
+def _assert_event(event: dict[str, Any], event_type: str, **fields: Any) -> None:
+    assert event["type"] == event_type
+    assert isinstance(event["ts"], float)
+    assert isinstance(event["iteration"], int)
+    for key, value in fields.items():
+        assert event[key] == value
 
 
 def test_add_mcp_server_is_lazy_until_first_send() -> None:
@@ -131,6 +142,150 @@ def test_send_runs_function_call_loop_and_tracks_turn_artifacts() -> None:
     ]
 
 
+def test_send_emits_events_for_multi_round_trip() -> None:
+    mcp_session = _FakeMcpSession(
+        tools=[{"name": "sum", "description": "Adds", "inputSchema": {"type": "object"}}],
+        tool_result={"result": 3},
+    )
+    responses = _FakeResponsesClient(
+        [
+            {
+                "id": "resp-1",
+                "output": [
+                    {"type": "message", "content": [{"type": "output_text", "text": "working"}]},
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "sum",
+                        "arguments": '{"a": 1, "b": 2}',
+                    },
+                ],
+            },
+            {
+                "id": "resp-2",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "final answer"}],
+                    }
+                ],
+            },
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    chat = ChatSession(
+        model="test-model",
+        base_url="https://responses.example.test",
+        on_event=events.append,
+        _responses_client=responses,
+        _mcp_session_factory=lambda _server: mcp_session,
+    )
+    chat.add_mcp_server(McpServer(url="https://example.test/mcp"))
+
+    turn = chat.send("compute")
+
+    assert turn.response_text == "final answer"
+    assert [event["type"] for event in events] == [
+        "iteration",
+        "assistant_text",
+        "tool_call",
+        "tool_result",
+        "iteration",
+        "finished",
+    ]
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=10)
+    _assert_event(events[1], "assistant_text", iteration=1, text="working")
+    _assert_event(
+        events[2],
+        "tool_call",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        arguments={"a": 1, "b": 2},
+    )
+    _assert_event(
+        events[3],
+        "tool_result",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        output='{"result": 3}',
+    )
+    _assert_event(events[4], "iteration", iteration=2, max_iterations=10)
+    _assert_event(events[5], "finished", iteration=2, text="final answer")
+
+
+def test_send_skips_empty_assistant_text_event() -> None:
+    mcp_session = _FakeMcpSession(
+        tools=[{"name": "sum", "description": "Adds", "inputSchema": {"type": "object"}}],
+        tool_result={"result": 3},
+    )
+    responses = _FakeResponsesClient(
+        [
+            {
+                "id": "resp-1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "sum",
+                        "arguments": '{"a": 1, "b": 2}',
+                    }
+                ],
+            },
+            {
+                "id": "resp-2",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "final answer"}],
+                    }
+                ],
+            },
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    chat = ChatSession(
+        model="test-model",
+        base_url="https://responses.example.test",
+        on_event=events.append,
+        _responses_client=responses,
+        _mcp_session_factory=lambda _server: mcp_session,
+    )
+    chat.add_mcp_server(McpServer(url="https://example.test/mcp"))
+
+    chat.send("compute")
+
+    assert [event["type"] for event in events] == [
+        "iteration",
+        "tool_call",
+        "tool_result",
+        "iteration",
+        "finished",
+    ]
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=10)
+    _assert_event(
+        events[1],
+        "tool_call",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        arguments={"a": 1, "b": 2},
+    )
+    _assert_event(
+        events[2],
+        "tool_result",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        output='{"result": 3}',
+    )
+    _assert_event(events[3], "iteration", iteration=2, max_iterations=10)
+    _assert_event(events[4], "finished", iteration=2, text="final answer")
+
+
 def test_duplicate_tool_names_across_servers_raise_error() -> None:
     first = _FakeMcpSession(tools=[{"name": "search", "inputSchema": {"type": "object"}}])
     second = _FakeMcpSession(tools=[{"name": "search", "inputSchema": {"type": "object"}}])
@@ -185,8 +340,86 @@ def test_max_iterations_backstop_raises_when_loop_never_finishes() -> None:
     )
     chat.add_mcp_server(McpServer(url="https://example.test/mcp"))
 
-    with pytest.raises(MaxIterationsExceededError):
+    events: list[dict[str, Any]] = []
+    chat.on_event = events.append
+
+    with pytest.raises(MaxIterationsExceededError) as exc_info:
         chat.send("go")
+
+    error = exc_info.value
+
+    assert error.iterations == 1
+    assert error.turn is chat.transcript[-1]
+    assert "1" in str(error)
+    assert error.turn is not None
+    assert error.turn.tool_calls[0]["name"] == "ping"
+    assert error.turn.tool_results[0] == {"call_id": "call-1", "name": "ping", "result": '{"ok": true}'}
+    assert [event["type"] for event in events] == [
+        "iteration",
+        "tool_call",
+        "tool_result",
+        "max_iterations",
+    ]
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=1)
+    _assert_event(
+        events[1],
+        "tool_call",
+        iteration=1,
+        name="ping",
+        call_id="call-1",
+        arguments={},
+    )
+    _assert_event(
+        events[2],
+        "tool_result",
+        iteration=1,
+        name="ping",
+        call_id="call-1",
+        output='{"ok": true}',
+    )
+    _assert_event(events[3], "max_iterations", iteration=1, max_iterations=1)
+
+
+def test_tool_error_event_is_emitted_before_exception_propagates() -> None:
+    expected = RuntimeError("tool failed")
+    mcp_session = _FakeMcpSession(
+        tools=[{"name": "ping", "description": "Pings", "inputSchema": {"type": "object"}}],
+        tool_error=expected,
+    )
+    responses = _FakeResponsesClient(
+        [
+            {
+                "id": "resp-1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "ping",
+                        "arguments": "{}",
+                    }
+                ],
+            }
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    chat = ChatSession(
+        model="test-model",
+        base_url="https://responses.example.test",
+        on_event=events.append,
+        _responses_client=responses,
+        _mcp_session_factory=lambda _server: mcp_session,
+    )
+    chat.add_mcp_server(McpServer(url="https://example.test/mcp"))
+
+    with pytest.raises(RuntimeError, match="tool failed") as exc_info:
+        chat.send("go")
+
+    assert exc_info.value is expected
+    assert [event["type"] for event in events] == ["iteration", "tool_call", "tool_error"]
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=10)
+    _assert_event(events[1], "tool_call", iteration=1, name="ping", call_id="call-1", arguments={})
+    _assert_event(events[2], "tool_error", iteration=1, name="ping", call_id="call-1", error="tool failed")
 
 
 def test_max_iterations_none_allows_multi_step_loop_to_complete() -> None:
