@@ -206,7 +206,7 @@ class ChatSession:
         if max_iterations is None:
             raise RuntimeError("max_iterations unexpectedly unset")
         self.transcript.append(turn)
-        self._emit("max_iterations", iteration=iterations)
+        self._emit("max_iterations", iteration=iterations, max_iterations=max_iterations)
         raise MaxIterationsExceededError(
             max_iterations,
             turn=turn,

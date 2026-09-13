@@ -377,7 +377,7 @@ def test_max_iterations_backstop_raises_when_loop_never_finishes() -> None:
         call_id="call-1",
         output='{"ok": true}',
     )
-    _assert_event(events[3], "max_iterations", iteration=1)
+    _assert_event(events[3], "max_iterations", iteration=1, max_iterations=1)
 
 
 def test_tool_error_event_is_emitted_before_exception_propagates() -> None:
