@@ -46,11 +46,12 @@ class _FakeResponsesClient:
         return self.responses[len(self.calls) - 1]
 
 
-def _assert_event_payloads(events: list[dict[str, Any]]) -> None:
-    assert events
-    for event in events:
-        assert isinstance(event["type"], str)
-        assert isinstance(event["ts"], float)
+def _assert_event(event: dict[str, Any], event_type: str, **fields: Any) -> None:
+    assert event["type"] == event_type
+    assert isinstance(event["ts"], float)
+    assert isinstance(event["iteration"], int)
+    for key, value in fields.items():
+        assert event[key] == value
 
 
 def test_add_mcp_server_is_lazy_until_first_send() -> None:
@@ -193,17 +194,26 @@ def test_send_emits_events_for_multi_round_trip() -> None:
         "iteration",
         "finished",
     ]
-    assert events[0]["iteration"] == 1
-    assert events[0]["max_iterations"] == 10
-    assert events[1]["text"] == "working"
-    assert events[2]["name"] == "sum"
-    assert events[2]["call_id"] == "call-1"
-    assert events[2]["arguments"] == {"a": 1, "b": 2}
-    assert events[3]["call_id"] == "call-1"
-    assert events[3]["output"] == '{"result": 3}'
-    assert events[4]["iteration"] == 2
-    assert events[5]["text"] == "final answer"
-    _assert_event_payloads(events)
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=10)
+    _assert_event(events[1], "assistant_text", iteration=1, text="working")
+    _assert_event(
+        events[2],
+        "tool_call",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        arguments={"a": 1, "b": 2},
+    )
+    _assert_event(
+        events[3],
+        "tool_result",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        output='{"result": 3}',
+    )
+    _assert_event(events[4], "iteration", iteration=2, max_iterations=10)
+    _assert_event(events[5], "finished", iteration=2, text="final answer")
 
 
 def test_send_skips_empty_assistant_text_event() -> None:
@@ -255,7 +265,25 @@ def test_send_skips_empty_assistant_text_event() -> None:
         "iteration",
         "finished",
     ]
-    _assert_event_payloads(events)
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=10)
+    _assert_event(
+        events[1],
+        "tool_call",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        arguments={"a": 1, "b": 2},
+    )
+    _assert_event(
+        events[2],
+        "tool_result",
+        iteration=1,
+        name="sum",
+        call_id="call-1",
+        output='{"result": 3}',
+    )
+    _assert_event(events[3], "iteration", iteration=2, max_iterations=10)
+    _assert_event(events[4], "finished", iteration=2, text="final answer")
 
 
 def test_duplicate_tool_names_across_servers_raise_error() -> None:
@@ -332,8 +360,24 @@ def test_max_iterations_backstop_raises_when_loop_never_finishes() -> None:
         "tool_result",
         "max_iterations",
     ]
-    assert events[-1]["iteration"] == 1
-    _assert_event_payloads(events)
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=1)
+    _assert_event(
+        events[1],
+        "tool_call",
+        iteration=1,
+        name="ping",
+        call_id="call-1",
+        arguments={},
+    )
+    _assert_event(
+        events[2],
+        "tool_result",
+        iteration=1,
+        name="ping",
+        call_id="call-1",
+        output='{"ok": true}',
+    )
+    _assert_event(events[3], "max_iterations", iteration=1)
 
 
 def test_tool_error_event_is_emitted_before_exception_propagates() -> None:
@@ -373,10 +417,9 @@ def test_tool_error_event_is_emitted_before_exception_propagates() -> None:
 
     assert exc_info.value is expected
     assert [event["type"] for event in events] == ["iteration", "tool_call", "tool_error"]
-    assert events[1]["name"] == "ping"
-    assert events[1]["call_id"] == "call-1"
-    assert events[2]["error"] == "tool failed"
-    _assert_event_payloads(events)
+    _assert_event(events[0], "iteration", iteration=1, max_iterations=10)
+    _assert_event(events[1], "tool_call", iteration=1, name="ping", call_id="call-1", arguments={})
+    _assert_event(events[2], "tool_error", iteration=1, name="ping", call_id="call-1", error="tool failed")
 
 
 def test_max_iterations_none_allows_multi_step_loop_to_complete() -> None:

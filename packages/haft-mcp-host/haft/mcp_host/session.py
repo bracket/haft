@@ -258,27 +258,6 @@ class ChatSession:
             request_headers=self.request_headers,
         )
 
-    def _call_tool(
-        self,
-        binding: _ToolBinding,
-        tool_name: str,
-        arguments: dict[str, Any],
-        *,
-        iteration: int,
-        call_id: str,
-    ) -> Any:
-        try:
-            return binding.session.call_tool(tool_name, arguments)
-        except Exception as exc:
-            self._emit(
-                "tool_error",
-                iteration=iteration,
-                name=tool_name,
-                call_id=call_id,
-                error=str(exc),
-            )
-            raise
-
     def _dispatch_tool_calls(
         self,
         function_calls: list[dict[str, Any]],
@@ -301,13 +280,17 @@ class ChatSession:
                 call_id=call_id,
                 arguments=arguments,
             )
-            result = self._call_tool(
-                binding,
-                tool_name,
-                arguments,
-                iteration=iteration,
-                call_id=call_id,
-            )
+            try:
+                result = binding.session.call_tool(tool_name, arguments)
+            except Exception as exc:
+                self._emit(
+                    "tool_error",
+                    iteration=iteration,
+                    name=tool_name,
+                    call_id=call_id,
+                    error=str(exc),
+                )
+                raise
             output_text = _tool_output_text(result)
             self._emit(
                 "tool_result",
