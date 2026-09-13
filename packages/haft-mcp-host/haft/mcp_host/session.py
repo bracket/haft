@@ -93,8 +93,8 @@ class ChatSession:
     ) -> None:
         """Initialize a chat session.
 
-        The optional ``on_event`` callback is invoked inline; it must not raise,
-        and any exception it raises propagates to the caller.
+        The optional ``on_event`` callback is invoked synchronously. It must not
+        raise, and callback exceptions are not caught.
         """
         self.model = model
         self.base_url = base_url
@@ -256,6 +256,27 @@ class ChatSession:
             request_headers=self.request_headers,
         )
 
+    def _call_tool(
+        self,
+        binding: _ToolBinding,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        iteration: int,
+        call_id: str,
+    ) -> Any:
+        try:
+            return binding.session.call_tool(tool_name, arguments)
+        except Exception as exc:
+            self._emit(
+                "tool_error",
+                iteration=iteration,
+                name=tool_name,
+                call_id=call_id,
+                error=str(exc),
+            )
+            raise
+
     def _dispatch_tool_calls(
         self,
         function_calls: list[dict[str, Any]],
@@ -278,17 +299,13 @@ class ChatSession:
                 call_id=call_id,
                 arguments=arguments,
             )
-            try:
-                result = binding.session.call_tool(tool_name, arguments)
-            except Exception as exc:
-                self._emit(
-                    "tool_error",
-                    iteration=iteration,
-                    name=tool_name,
-                    call_id=call_id,
-                    error=str(exc),
-                )
-                raise
+            result = self._call_tool(
+                binding,
+                tool_name,
+                arguments,
+                iteration=iteration,
+                call_id=call_id,
+            )
             output_text = _tool_output_text(result)
             self._emit(
                 "tool_result",
