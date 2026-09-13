@@ -93,7 +93,8 @@ class ChatSession:
     ) -> None:
         """Initialize a chat session.
 
-        The optional ``on_event`` callback is invoked inline and must not raise.
+        The optional ``on_event`` callback is invoked inline; it must not raise,
+        and any exception it raises propagates to the caller.
         """
         self.model = model
         self.base_url = base_url
